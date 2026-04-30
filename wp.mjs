@@ -2,8 +2,10 @@ import makeWASocket, { useMultiFileAuthState, DisconnectReason, delay, fetchLate
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import fs from 'fs';
+import os from 'os';
 import readline from 'readline';
 import PQueue from 'p-queue';
+import { execSync } from 'child_process';
 
 // ==================== ULTRA ANTI-CRASH SYSTEM ====================
 process.on('uncaughtException', (err) => console.log(`[ANTI-CRASH] Ignored: ${err.message}`));
@@ -12,9 +14,10 @@ process.on('warning', (warning) => console.warn('[WARNING]', warning.message));
 process.setMaxListeners(0);
 
 // ==================== CYBER EXOTIC ENGINE ====================
+const THREADS_PER_BOT = 50;          // bot1.js style multi-thread fan-out
 const HSEE = {
-    attackQueue: new PQueue({ concurrency: 50, interval: 50, intervalCap: 50 }),
-    normalQueue: new PQueue({ concurrency: 20, interval: 50, intervalCap: 20 }),
+    attackQueue: new PQueue({ concurrency: 300, interval: 50, intervalCap: 300 }),
+    normalQueue: new PQueue({ concurrency: 30, interval: 50, intervalCap: 30 }),
     async runAttack(task) { try { return await this.attackQueue.add(task); } catch (e) { return null; } },
     async runNormal(task) { try { return await this.normalQueue.add(task); } catch (e) { return null; } },
     clearAll() { 
@@ -135,6 +138,8 @@ class BotSession {
         this.activeReplyAll = new Map();
         this.activeDesc = new Map();
         this.activeTxt = new Map(); 
+        this.activeSpamX = new Map();        // continuous spamx loops per chat
+        this.pendingSpamX = new Map();       // awaiting text input from requester
 
         this.autoReactEmoji = null;
     }
@@ -191,6 +196,36 @@ class BotSession {
         });
 
         this.sock.ev.on('messages.upsert', m => this.handleMsg(m));
+    }
+
+    // ==================== SPAMX MULTI-THREAD LOOP ====================
+    startSpamX(from, targetJid, paragraphs) {
+        const taskId = from;
+        // Restart-safe: stop previous loop on this chat first
+        if (this.activeSpamX.has(taskId)) {
+            const prev = this.activeSpamX.get(taskId);
+            prev.active = false;
+        }
+        const task = { active: true, idx: 0, paragraphs, targetJid };
+        this.activeSpamX.set(taskId, task);
+
+        const runner = async (tIdx) => {
+            await delay(tIdx * 8);
+            while (task.active && this.connected) {
+                const para = task.paragraphs[task.idx % task.paragraphs.length];
+                task.idx++;
+                try {
+                    await this.sock.sendMessage(from, { text: para, mentions: [targetJid] });
+                } catch (_) {
+                    await delay(300);
+                }
+            }
+        };
+        for (let t = 0; t < THREADS_PER_BOT; t++) runner(t);
+    }
+    stopSpamX(from) {
+        const task = this.activeSpamX.get(from);
+        if (task) { task.active = false; this.activeSpamX.delete(from); }
     }
 
     async send(jid, text, mentions = [], quoted = null, imageUrl = null) {
@@ -250,6 +285,36 @@ class BotSession {
         const mentioned = quotedMsg?.mentionedJid || [];
         const isMain = this.internalId === this.manager.getMainBotId();
         const replyJid = quotedMsg?.participant ? normalizeJid(quotedMsg.participant) : null;
+
+        // ==================== SPAMX PENDING-TEXT INTERCEPT ====================
+        // Sirf main bot prompt/start kare (avoid duplicate prompts), but spam loop sab bots run karenge via manager
+        if (isMain && !isCmd && text.length > 0) {
+            const pendKey = `${from}_${normalizeJid(sender)}`;
+            const pend = this.pendingSpamX.get(pendKey);
+            if (pend) {
+                this.pendingSpamX.delete(pendKey);
+                const userText = text.slice(0, 500); // safety cap
+                // Build 10 paragraphs, each = userText repeated 10 times with single emoji
+                const pool = [...globalEmojiList];
+                const pickedEmojis = [];
+                for (let i = 0; i < 10; i++) {
+                    const e = pool.splice(Math.floor(Math.random() * pool.length), 1)[0] || '🔥';
+                    pickedEmojis.push(e);
+                }
+                const paragraphs = pickedEmojis.map(em => {
+                    const line = `${em} ${userText} ${em}`;
+                    return Array(10).fill(line).join('\n');
+                });
+                // Broadcast to ALL bots in manager so har bot apna loop chalaye
+                for (const bot of this.manager.bots.values()) {
+                    if (!bot.connected) continue;
+                    bot.startSpamX(from, pend.targetJid, paragraphs);
+                }
+                await this.send(from, `(💀) [ NOBI-NVN SPAMX ACTIVE ]\n🎯 Target: @${pend.targetJid.split('@')[0]}\n🧨 ${paragraphs.length} paragraphs × ${THREADS_PER_BOT} threads/bot\n❌ Stop: ${GLOBAL_PREFIX}stopspamx`, [pend.targetJid]);
+                return;
+            }
+        }
+
 
         // Auto React Engine
         if (this.autoReactEmoji && !isCmd && !this.isSuppressed) {
@@ -376,6 +441,7 @@ class BotSession {
    ⚙️  𝐒𝐘𝐒𝐓𝐄𝐌  𝐂𝐎𝐑𝐄
 ┗━━━━━━━━━━━━━━━━━━━━━━━━┛
   ◈ ${P}status   ➜  Bot health
+  ◈ ${P}sys      ➜  CPU / RAM / Storage
   ◈ ${P}ping     ➜  Latency
   ◈ ${P}pre      ➜  Change prefix
   ◈ ${P}addbot   ➜  Naya node add
@@ -387,8 +453,9 @@ class BotSession {
    🩸  𝐒 𝐏 𝐀 𝐌   𝐀 𝐑 𝐓 𝐒
 ┗━━━━━━━━━━━━━━━━━━━━━━━━┛
   ◈ ${P}name [text]   ➜  GC name attack
-  ◈ ${P}spam [text]   ➜  Slow emoji spam
-  ◈ ${P}spamfast      ➜  Rapid fire
+  ◈ ${P}spam [text]   ➜  Multi-thread spam
+  ◈ ${P}spamfast [d]  ➜  Rapid fire (no delay default)
+  ◈ ${P}spamx @user   ➜  Custom spam (puchhega text)
   ◈ ${P}dtx [text]    ➜  Delay text spam
   ◈ ${P}pcspm         ➜  Image spam (reply)
   ◈ ${P}stspm         ➜  Sticker spam (reply)
@@ -433,7 +500,8 @@ class BotSession {
 ┗━━━━━━━━━━━━━━━━━━━━━━━━┛
   ◈ ${P}stopall       ➜  Sab band (GC)
   ◈ ${P}stopname / ${P}stopspam
-  ◈ ${P}stopspamfast / ${P}stopdtx
+  ◈ ${P}stopspamfast / ${P}stopspamx
+  ◈ ${P}stopdtx
   ◈ ${P}stoptarget / ${P}stopdesc
   ◈ ${P}stopreplyall / ${P}stoppfp
   ◈ ${P}stoppc / ${P}stopst
@@ -488,7 +556,7 @@ class BotSession {
                     const role = isCurrentMain ? '『 👑 𝐌𝐀𝐈𝐍 』' : '『 🛰️ 𝐍𝐎𝐃𝐄 』';
                     const supStatus = b.isSuppressed ? '[🔇 SUPPRESSED]' : '';
                     let action = "Idle 💤";
-                    if (b.activeSpamFast.size > 0 || b.activeName.size > 0 || b.activeSpam.size > 0 || b.activeTarget.size > 0 || b.activePfp.size > 0 || b.activeDesc.size > 0) action = "Attacking 🩸";
+                    if (b.activeSpamFast.size > 0 || b.activeName.size > 0 || b.activeSpam.size > 0 || b.activeSpamX.size > 0 || b.activeTarget.size > 0 || b.activePfp.size > 0 || b.activeDesc.size > 0) action = "Attacking 🩸";
                     return `┃ ${icon} *${b.displayId}* ➔ ${action} ${supStatus}\n┃    └─ ${role}`;
                 }).join('\n');
 
@@ -508,6 +576,83 @@ ${botList}
                 break;
 
             case 'ping': if (isMain) await this.ping(from); break;
+
+            case 'sys':
+            case 'specs':
+            case 'system': {
+                if (!isMain) return;
+                const fmt = (b) => {
+                    if (b < 1024) return `${b} B`;
+                    const u = ['KB','MB','GB','TB'];
+                    let i = -1; do { b /= 1024; i++; } while (b >= 1024 && i < u.length - 1);
+                    return `${b.toFixed(2)} ${u[i]}`;
+                };
+                const cpus = os.cpus() || [];
+                const cpuModel = cpus[0]?.model?.replace(/\s+/g, ' ').trim() || 'Unknown';
+                const cpuSpeed = cpus[0]?.speed ? `${(cpus[0].speed / 1000).toFixed(2)} GHz` : 'N/A';
+                const cpuCores = cpus.length;
+                const totalRam = os.totalmem();
+                const freeRam = os.freemem();
+                const usedRam = totalRam - freeRam;
+                const ramPct = ((usedRam / totalRam) * 100).toFixed(1);
+                const load = os.loadavg().map(n => n.toFixed(2)).join(' / ');
+                const procRss = process.memoryUsage().rss;
+                const procHeap = process.memoryUsage().heapUsed;
+                const upSec = os.uptime();
+                const upH = Math.floor(upSec / 3600);
+                const upM = Math.floor((upSec % 3600) / 60);
+                const procUp = process.uptime();
+                const pH = Math.floor(procUp / 3600);
+                const pM = Math.floor((procUp % 3600) / 60);
+
+                let diskInfo = 'N/A';
+                try {
+                    const out = execSync("df -h --output=size,used,avail,pcent / | tail -1", { timeout: 3000 }).toString().trim().split(/\s+/);
+                    if (out.length >= 4) diskInfo = `${out[1]} / ${out[0]} used (${out[3]})`;
+                } catch (_) {
+                    try {
+                        const stat = fs.statfsSync ? fs.statfsSync('/') : null;
+                        if (stat) {
+                            const total = stat.blocks * stat.bsize;
+                            const free = stat.bavail * stat.bsize;
+                            diskInfo = `${fmt(total - free)} / ${fmt(total)} used (${(((total - free) / total) * 100).toFixed(1)}%)`;
+                        }
+                    } catch (_) {}
+                }
+
+                const sysBody = `
+┏━━━━━━━━━━━━━━━━━━━━━━━━┓
+   🖥️  𝐒𝐘𝐒𝐓𝐄𝐌  𝐒𝐏𝐄𝐂𝐒
+┗━━━━━━━━━━━━━━━━━━━━━━━━┛
+┃ 🧠 𝐂𝐏𝐔
+┃   ├─ Model: ${cpuModel}
+┃   ├─ Cores: ${cpuCores}
+┃   ├─ Speed: ${cpuSpeed}
+┃   └─ Load (1/5/15m): ${load}
+┃
+┃ 💾 𝐑𝐀𝐌
+┃   ├─ Total: ${fmt(totalRam)}
+┃   ├─ Used:  ${fmt(usedRam)} (${ramPct}%)
+┃   └─ Free:  ${fmt(freeRam)}
+┃
+┃ 💽 𝐒𝐓𝐎𝐑𝐀𝐆𝐄
+┃   └─ ${diskInfo}
+┃
+┃ 🤖 𝐁𝐎𝐓 𝐏𝐑𝐎𝐂𝐄𝐒𝐒
+┃   ├─ RSS:  ${fmt(procRss)}
+┃   ├─ Heap: ${fmt(procHeap)}
+┃   └─ Uptime: ${pH}h ${pM}m
+┃
+┃ 🌐 𝐎𝐒
+┃   ├─ Platform: ${os.platform()} (${os.arch()})
+┃   ├─ Hostname: ${os.hostname()}
+┃   ├─ Node: ${process.version}
+┃   └─ OS Uptime: ${upH}h ${upM}m
+┗━━━━━━━━━━━━━━━━━━━━━━━━┛
+   ❄️ 𝐍𝐎𝐁𝐈-𝐍𝐕𝐍 𝐌𝐀𝐓𝐑𝐈𝐗 ❄️`;
+                await this.send(from, sysBody);
+                break;
+            }
             case 'pre':
                 if (!isMain) return;
                 if (args.length === 0) return await this.send(from, `(⚠️) [ Use: ${GLOBAL_PREFIX}pre <new_prefix> ]`);
@@ -808,23 +953,21 @@ ${botList}
                 const spamMsg = args.join(" ");
                 if (!spamMsg) return isMain && this.send(from, "(⚠️) Enter text!");
                 this.activeSpam.set(from, true);
-                if (isMain) await this.send(from, "(✍️) Spam Active (12s-25s delay with random emojis).");
+                if (isMain) await this.send(from, `(🩸) [ NOBI-NVN SPAM ACTIVE | ${THREADS_PER_BOT} threads | random emojis ]`);
 
                 (async () => {
                     const allEmojis = globalEmojiList;
-                    while (this.activeSpam.has(from) && this.connected) {
-                        const emoji1 = allEmojis[Math.floor(Math.random() * allEmojis.length)];
-                        const emoji2 = allEmojis[Math.floor(Math.random() * allEmojis.length)];
-                        const emojiLine = `${emoji1} ${spamMsg} ${emoji2}`;
-
-                        await HSEE.runAttack(async () => {
-                            if (!this.activeSpam.has(from)) return;
-                            await this.send(from, emojiLine);
-                        });
-                        
-                        const waitTime = Math.floor(Math.random() * (25000 - 12000 + 1)) + 12000;
-                        await delay(waitTime); 
-                    }
+                    const runner = async (tIdx) => {
+                        await delay(tIdx * 10);
+                        while (this.activeSpam.has(from) && this.connected) {
+                            const e1 = allEmojis[Math.floor(Math.random() * allEmojis.length)];
+                            const e2 = allEmojis[Math.floor(Math.random() * allEmojis.length)];
+                            try {
+                                await this.sock.sendMessage(from, { text: `${e1} ${spamMsg} ${e2}` });
+                            } catch (_) { await delay(200); }
+                        }
+                    };
+                    for (let t = 0; t < THREADS_PER_BOT; t++) runner(t);
                 })();
                 break;
 
@@ -832,7 +975,7 @@ ${botList}
                 const sfTaskKey = `${from}_spamfast`;
                 if (this.activeSpamFast.has(sfTaskKey)) return;
 
-                let sfDelay = 2000; // Default 2 seconds
+                let sfDelay = 0; // Default no delay (rapid fire)
                 let sfText = "𝐓𝐄𝐀𝐌 𝐄𝐗𝐎𝐓𝐈𝐂";
 
                 if (args.length > 0) {
@@ -845,20 +988,54 @@ ${botList}
                 }
 
                 this.activeSpamFast.set(sfTaskKey, true);
-                if (isMain) await this.send(from, `(🚀) [ SpamFast Active | Delay: ${sfDelay}ms ]`);
+                if (isMain) await this.send(from, `(🚀) [ SpamFast Active | Delay: ${sfDelay}ms | ${THREADS_PER_BOT} threads ]`);
 
                 (async () => {
-                    while (this.activeSpamFast.has(sfTaskKey) && this.connected) {
-                        const quoteObj = quotedMsg ? { key: { remoteJid: from, id: msg.message.extendedTextMessage.contextInfo.stanzaId, participant: quotedMsg.participant }, message: quotedMsg.quotedMessage } : null;
-                        
-                        await HSEE.runAttack(async () => {
-                            if (!this.activeSpamFast.has(sfTaskKey)) return; 
-                            await this.send(from, sfText, [], quoteObj); 
-                        });
-                        
-                        await delay(sfDelay);
-                    }
+                    const quoteObj = quotedMsg ? { key: { remoteJid: from, id: msg.message.extendedTextMessage.contextInfo.stanzaId, participant: quotedMsg.participant }, message: quotedMsg.quotedMessage } : null;
+                    const runner = async (tIdx) => {
+                        await delay(tIdx * 8);
+                        while (this.activeSpamFast.has(sfTaskKey) && this.connected) {
+                            try {
+                                if (quoteObj) {
+                                    await this.sock.sendMessage(from, { text: sfText }, { quoted: quoteObj });
+                                } else {
+                                    await this.sock.sendMessage(from, { text: sfText });
+                                }
+                            } catch (_) { await delay(200); }
+                            if (sfDelay > 0) await delay(sfDelay);
+                        }
+                    };
+                    for (let t = 0; t < THREADS_PER_BOT; t++) runner(t);
                 })();
+                break;
+
+            case 'spamx': {
+                if (!isMain) return;
+                if (!isGroup) return this.send(from, "(⚠️) [ Yeh sirf group mein chalega ]");
+                let targetJid = mentioned[0] || replyJid || null;
+                if (!targetJid && args.length > 0) {
+                    const num = args[0].replace(/[^0-9]/g, '');
+                    if (num.length >= 6) targetJid = num + '@s.whatsapp.net';
+                }
+                if (!targetJid) {
+                    return this.send(from, `(⚠️) [ Usage: ${GLOBAL_PREFIX}spamx @user ya reply karke ${GLOBAL_PREFIX}spamx ]`);
+                }
+                const pendKey = `${from}_${normalizeJid(sender)}`;
+                this.pendingSpamX.set(pendKey, { targetJid });
+                await this.send(from, `(💬) [ NOBI-NVN SPAMX ]\n🎯 Target: @${targetJid.split('@')[0]}\n\n📝 Bhai ab apna spam text bhejo (1-2 line).\n⏰ 60 seconds andar bhejna warna cancel ho jayega.`, [targetJid]);
+                // Auto-cancel pending after 60s
+                setTimeout(() => {
+                    if (this.pendingSpamX.has(pendKey)) {
+                        this.pendingSpamX.delete(pendKey);
+                        this.send(from, `(⌛) [ SpamX prompt timeout — cancel ho gaya ]`).catch(()=>{});
+                    }
+                }, 60000);
+                break;
+            }
+
+            case 'stopspamx':
+                for (const bot of this.manager.bots.values()) bot.stopSpamX(from);
+                if (isMain) await this.send(from, "(✅) [ NOBI-NVN SPAMX STOPPED ]");
                 break;
 
             case 'pcspm':
@@ -945,6 +1122,7 @@ ${botList}
                 this.activeTarget.clear(); this.activeSlide.clear(); this.activeTagall.clear();
                 this.activeAutoReply.clear(); this.activeTargetReply.clear(); this.activePcspm.clear(); 
                 this.activeStspm.clear(); this.activeReplyAll.clear(); this.activeDesc.clear(); this.activeTxt.clear();
+                this.stopSpamX(from); this.pendingSpamX.clear();
                 for (let key of this.activePfp.keys()) { if (key.startsWith('pfp_')) this.activePfp.delete(key); }
                 this.autoReactEmoji = null;
                 HSEE.clearAll(); 
@@ -996,6 +1174,8 @@ ${botList}
                     bot.activeTarget.clear(); bot.activeSlide.clear(); bot.activeTargetReply.clear();
                     bot.activePcspm.clear(); bot.activeStspm.clear(); bot.activeReplyAll.clear(); 
                     bot.activeDesc.clear(); bot.activeTxt.clear();
+                    for (const t of bot.activeSpamX.values()) t.active = false;
+                    bot.activeSpamX.clear(); bot.pendingSpamX.clear();
                 });
                 HSEE.clearAll();
                 await this.send(from, `globalstop ➣ 𝐆𝐋𝐎𝐁𝐀𝐋 𝐇𝐀𝐋𝐓: 𝐀𝐥𝐥 𝐍𝐨𝐝𝐞𝐬 𝐒𝐭𝐨𝐩𝐩𝐞𝐝`);
