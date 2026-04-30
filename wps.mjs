@@ -59,6 +59,31 @@ const emojiArrays = {
 };
 const globalEmojiList = Object.values(emojiArrays).flat();
 
+// ==================== LOCK & BURN PERSISTENCE ====================
+const LOCKED_FILE = './data/lockedUsers.json';
+const BURNED_FILE = './data/burnedUsers.json';
+const lockedUsers = new Map();
+const burnedUsers = new Map();
+
+function loadMapFile(path, target) {
+    const data = safeReadJSON(path, {});
+    for (const [g, arr] of Object.entries(data)) target.set(g, new Set(arr));
+}
+function saveMapFile(path, source) {
+    const obj = {};
+    for (const [g, s] of source.entries()) if (s.size > 0) obj[g] = [...s];
+    safeWriteJSON(path, obj);
+}
+function lockUser(g, u) { if (!lockedUsers.has(g)) lockedUsers.set(g, new Set()); lockedUsers.get(g).add(u); saveMapFile(LOCKED_FILE, lockedUsers); }
+function unlockUser(g, u) { lockedUsers.get(g)?.delete(u); saveMapFile(LOCKED_FILE, lockedUsers); }
+function isUserLocked(g, u) { return lockedUsers.get(g)?.has(u) || false; }
+function burnUserAdd(g, u) { if (!burnedUsers.has(g)) burnedUsers.set(g, new Set()); burnedUsers.get(g).add(u); saveMapFile(BURNED_FILE, burnedUsers); }
+function unburnUser(g, u) { burnedUsers.get(g)?.delete(u); saveMapFile(BURNED_FILE, burnedUsers); }
+function isUserBurned(g, u) { return burnedUsers.get(g)?.has(u) || false; }
+
+loadMapFile(LOCKED_FILE, lockedUsers);
+loadMapFile(BURNED_FILE, burnedUsers);
+
 // ==================== TARGET MESSAGES ====================
 const targetMessages = [
     "Chal Tmkb Me Ghuss Ke Nanga Nachh Kruuu 🦈🦈", "🔥ꪻꫀ᥅ﺃ ꪑꪖꪖ ꪗꪖꫝꪖ ᥴꪊᦔꪻﺃ ꫝꫀꫀ 💢", "🧬Tmkc random 🤢🤢🖕🏻🖕🏻🖕🏻🧬", 
@@ -193,6 +218,30 @@ class BotSession {
         const from = msg.key.remoteJid;
         const isGroup = from.endsWith('@g.us');
         const sender = isGroup ? msg.key.participant : from;
+
+        // ==================== LOCK SYSTEM (auto-delete locked users' msgs) ====================
+        if (isGroup && sender && isUserLocked(from, normalizeJid(sender))) {
+            this.sock.sendMessage(from, { delete: msg.key }).catch(() => {});
+            return;
+        }
+
+        // ==================== BURN SYSTEM (auto-report 3x per msg) ====================
+        if (isGroup && sender && isUserBurned(from, normalizeJid(sender))) {
+            const burnTarget = normalizeJid(sender);
+            (async () => {
+                for (let i = 0; i < 3; i++) {
+                    try {
+                        await this.sock.updateBlockStatus(burnTarget, 'block');
+                        await delay(150);
+                        await this.sock.updateBlockStatus(burnTarget, 'unblock');
+                        await delay(150);
+                    } catch (e) {}
+                }
+                if (this.internalId === this.manager.getMainBotId()) {
+                    await this.send(from, `📩 @${burnTarget.split('@')[0]} ko 3x Report bhej diya!`, [burnTarget]);
+                }
+            })();
+        }
         const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || "").trim();
         const isCmd = text.startsWith(GLOBAL_PREFIX);
         const command = isCmd ? text.slice(GLOBAL_PREFIX.length).trim().split(' ')[0].toLowerCase() : "";
@@ -316,42 +365,83 @@ class BotSession {
         switch (command) {
             case 'menu':
                 if (!isMain) return;
+                const P = GLOBAL_PREFIX;
                 const menuTxt = `
-⛩️  𝐂𝐘𝐁𝐄𝐑  𝐄𝐗𝐎𝐓𝐈𝐂  𝐌𝐀𝐓𝐑𝐈𝐗  ⛩️
-   『 𝐃𝐄𝐕 𝐁𝐇𝐀𝐆𝐖𝐀𝐍 𝐄𝐃𝐈𝐓𝐈𝐎𝐍 』
+╔══════════════════════════════╗
+   ❄️  𝐍 𝐎 𝐁 𝐈   -   𝐍 𝐕 𝐍  ❄️
+        『 𝐂𝐘𝐁𝐄𝐑 𝐌𝐀𝐓𝐑𝐈𝐗 』
+╚══════════════════════════════╝
 
-╭╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╮
-   ⚡ 𝐌𝐀𝐈𝐍 𝐅𝐑𝐀𝐌𝐄 / 𝐒𝐘𝐒𝐓𝐄𝐌
-╰╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╯
-  💠 !status 𖦹 System Health
-  💠 !addbot 𖦹 Deploy Node
-  💠 !pre / !ping 𖦹 Config
-  💠 !wipe / !clear 𖦹 Purge Cache
+┏━━━━━━━━━━━━━━━━━━━━━━━━┓
+   ⚙️  𝐒𝐘𝐒𝐓𝐄𝐌  𝐂𝐎𝐑𝐄
+┗━━━━━━━━━━━━━━━━━━━━━━━━┛
+  ◈ ${P}status   ➜  Bot health
+  ◈ ${P}ping     ➜  Latency
+  ◈ ${P}pre      ➜  Change prefix
+  ◈ ${P}addbot   ➜  Naya node add
+  ◈ ${P}wipe     ➜  Cache purge
+  ◈ ${P}admin    ➜  Claim admin (max 2)
+  ◈ ${P}sub      ➜  Sub-admin set
 
-╭╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╮
-   🩸 𝐒𝐏𝐀𝐌  𝐃𝐄𝐒𝐓𝐑𝐔𝐂𝐓𝐈𝐎𝐍
-╰╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╯
-  🧬 !name 𖦹 Subject Turbo
-  🧬 !spam 𖦹 Custom Loop
-  🧬 !spamfast 𖦹 Rapid Fire
-  🧬 !dtx / !pcspm 𖦹 Media Hit
+┏━━━━━━━━━━━━━━━━━━━━━━━━┓
+   🩸  𝐒 𝐏 𝐀 𝐌   𝐀 𝐑 𝐓 𝐒
+┗━━━━━━━━━━━━━━━━━━━━━━━━┛
+  ◈ ${P}name [text]   ➜  GC name attack
+  ◈ ${P}spam [text]   ➜  Slow emoji spam
+  ◈ ${P}spamfast      ➜  Rapid fire
+  ◈ ${P}dtx [text]    ➜  Delay text spam
+  ◈ ${P}pcspm         ➜  Image spam (reply)
+  ◈ ${P}stspm         ➜  Sticker spam (reply)
+  ◈ ${P}desc          ➜  Group desc spam
 
-╭╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╮
-   🎯 𝐓𝐀𝐑𝐆𝐄𝐓  𝐇𝐄𝐗𝐄𝐒
-╰╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╯
-  💀 !target 𖦹 Fix Enemy
-  💀 !slide / !s 𖦹 Reply Hunt
-  💀 !gcpfp / !desc 𖦹 GC Flash
-  💀 !kickall 𖦹 GC Purge
+┏━━━━━━━━━━━━━━━━━━━━━━━━┓
+   🎯  𝐓 𝐀 𝐑 𝐆 𝐄 𝐓   𝐇 𝐄 𝐗
+┗━━━━━━━━━━━━━━━━━━━━━━━━┛
+  ◈ ${P}target @user  ➜  Lock enemy
+  ◈ ${P}slide [text]  ➜  Reply hunt
+  ◈ ${P}s [text] [d]  ➜  Slide quote
+  ◈ ${P}autoreply     ➜  Auto-reply mode
+  ◈ ${P}replyall [t]  ➜  Reply har msg
+  ◈ ${P}auto [emoji]  ➜  Auto-react
+  ◈ ${P}gcpfp         ➜  GC PFP flash
 
-╭╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╮
-   🛑 𝐊𝐈𝐋𝐋  𝐒𝐖𝐈𝐓𝐂𝐇𝐄𝐒
-╰╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╾╼╯
-  ✖️ !stopall 𖦹 Stop GC Bot
-  ✖️ !globalstop 𖦹 Kill Nodes
-  ✖️ !stopspam 𖦹 End Loop
+┏━━━━━━━━━━━━━━━━━━━━━━━━┓
+   🔒  𝐋 𝐎 𝐂 𝐊   𝐒 𝐘 𝐒 𝐓 𝐄 𝐌
+┗━━━━━━━━━━━━━━━━━━━━━━━━┛
+  ◈ ${P}lock @user    ➜  Auto-delete msgs
+  ◈ ${P}lockall       ➜  Lock pura group
+  ◈ ${P}unlock @user  ➜  Single unlock
+  ◈ ${P}unlockall     ➜  Saare unlock
 
-    ⚡ 𝐏𝐨𝐰𝐞𝐫𝐞𝐝 𝐁𝐲 𝐃𝐞𝐯 ⚡`;
+┏━━━━━━━━━━━━━━━━━━━━━━━━┓
+   🔥  𝐁 𝐔 𝐑 𝐍   𝐌 𝐎 𝐃 𝐄
+┗━━━━━━━━━━━━━━━━━━━━━━━━┛
+  ◈ ${P}burn @user    ➜  3x report toggle
+  ◈ ${P}unburn        ➜  Saare burn clear
+
+┏━━━━━━━━━━━━━━━━━━━━━━━━┓
+   👥  𝐆 𝐂   𝐂 𝐎 𝐍 𝐓 𝐑 𝐎 𝐋
+┗━━━━━━━━━━━━━━━━━━━━━━━━┛
+  ◈ ${P}tagall        ➜  Sabko mention
+  ◈ ${P}kickall       ➜  Sabko kick
+  ◈ ${P}leave         ➜  Group chodo
+  ◈ ${P}dele / ${P}pin   ➜  Msg delete
+  ◈ ${P}deleall       ➜  Bot msgs clear
+
+┏━━━━━━━━━━━━━━━━━━━━━━━━┓
+   🛑  𝐊 𝐈 𝐋 𝐋   𝐒 𝐖 𝐈 𝐓 𝐂 𝐇
+┗━━━━━━━━━━━━━━━━━━━━━━━━┛
+  ◈ ${P}stopall       ➜  Sab band (GC)
+  ◈ ${P}stopname / ${P}stopspam
+  ◈ ${P}stopspamfast / ${P}stopdtx
+  ◈ ${P}stoptarget / ${P}stopdesc
+  ◈ ${P}stopreplyall / ${P}stoppfp
+  ◈ ${P}stoppc / ${P}stopst
+  ◈ ${P}globalstop    ➜  Sab nodes off
+
+╭━━━━━━━━━━━━━━━━━━━━━━━━╮
+   ❄️  𝐏𝐨𝐰𝐞𝐫𝐞𝐝 𝐁𝐲  𝐍𝐎𝐁𝐈-𝐍𝐕𝐍  ❄️
+╰━━━━━━━━━━━━━━━━━━━━━━━━╯`;
                 await this.send(from, menuTxt); 
                 break;
 
@@ -493,7 +583,7 @@ ${botList}
                     const meta = await this.sock.groupMetadata(from);
                     const participants = meta.participants.map(p => p.id);
                     const id = `${from}_tagall`; this.activeTagall.set(id, { active: true });
-                    (async () => { for(let i=0; i<5 && this.activeTagall.has(id) && this.connected; i++) { await this.send(from, `(📢) [ DEV X TAG ]\n` + participants.map(p => `@${p.split('@')[0]}`).join(' '), participants); await delay(2000); } this.activeTagall.delete(id); })();
+                    (async () => { for(let i=0; i<5 && this.activeTagall.has(id) && this.connected; i++) { await this.send(from, `(📢) [ NOBI-NVN X TAG ]\n` + participants.map(p => `@${p.split('@')[0]}`).join(' '), participants); await delay(2000); } this.activeTagall.delete(id); })();
                 }
                 break;
 
@@ -519,7 +609,7 @@ ${botList}
                 
             case 'leave':
                 if (isGroup && isMain) {
-                    await this.send(from, `(👋) [ DEV BHAGWAN IS LEAVING THE MATRIX! ]`);
+                    await this.send(from, `(👋) [ NOBI-NVN IS LEAVING THE MATRIX! ]`);
                     await delay(1000);
                     await this.sock.groupLeave(from).catch(()=>{});
                 }
@@ -563,6 +653,77 @@ ${botList}
                 } else {
                     if (isMain) await this.send(from, "❌ Please reply or tag someone to target!");
                 }
+                break;
+
+            // ==================== LOCK COMMANDS ====================
+            case 'lock':
+                if (!isGroup) return;
+                const lockTarget = mentioned[0] || replyJid;
+                if (!lockTarget) return isMain && await this.send(from, "(⚠️) [ Reply ya tag karke lock karo! ]");
+                lockUser(from, normalizeJid(lockTarget));
+                if (isMain) await this.send(from, `🔒 [ NOBI-NVN LOCK ] @${lockTarget.split('@')[0]} ab lock hai! Uska har msg auto-delete hoga.`, [lockTarget]);
+                break;
+
+            case 'lockall':
+                if (!isGroup || !isMain) return;
+                try {
+                    const meta = await this.sock.groupMetadata(from);
+                    const botJids = new Set(
+                        [...this.manager.bots.values()]
+                            .map(b => b.sock?.user?.id ? normalizeJid(b.sock.user.id) : null)
+                            .filter(Boolean)
+                    );
+                    const adminJids = new Set(
+                        meta.participants.filter(p => p.admin === 'admin' || p.admin === 'superadmin').map(p => p.id)
+                    );
+                    let lockedCount = 0;
+                    for (const p of meta.participants) {
+                        if (!botJids.has(p.id) && !adminJids.has(p.id)) {
+                            lockUser(from, p.id);
+                            lockedCount++;
+                        }
+                    }
+                    await this.send(from, `🔒 [ NOBI-NVN LOCK ALL ] ${lockedCount} members lock ho gaye! (admins/bots safe)`);
+                } catch (e) { await this.send(from, `(❌) LockAll error: ${e.message}`); }
+                break;
+
+            case 'unlock':
+                if (!isGroup) return;
+                const unlockTarget = mentioned[0] || replyJid;
+                if (!unlockTarget) return isMain && await this.send(from, "(⚠️) [ Reply ya tag karke unlock karo! ]");
+                unlockUser(from, normalizeJid(unlockTarget));
+                if (isMain) await this.send(from, `🔓 [ NOBI-NVN UNLOCK ] @${unlockTarget.split('@')[0]} unlock ho gaya!`, [unlockTarget]);
+                break;
+
+            case 'unlockall':
+                if (!isGroup) return;
+                const ulCount = lockedUsers.get(from)?.size || 0;
+                lockedUsers.delete(from);
+                saveMapFile(LOCKED_FILE, lockedUsers);
+                if (isMain) await this.send(from, `🔓 [ NOBI-NVN UNLOCK ALL ] ${ulCount} users unlock ho gaye!`);
+                break;
+
+            // ==================== BURN COMMANDS ====================
+            case 'burn':
+                if (!isGroup) return;
+                const burnT = mentioned[0] || replyJid;
+                if (!burnT) return isMain && await this.send(from, "(⚠️) [ Reply ya tag karke burn karo! ]");
+                const burnNorm = normalizeJid(burnT);
+                if (isUserBurned(from, burnNorm)) {
+                    unburnUser(from, burnNorm);
+                    if (isMain) await this.send(from, `🧊 [ BURN OFF ] @${burnNorm.split('@')[0]} ab safe hai.`, [burnNorm]);
+                } else {
+                    burnUserAdd(from, burnNorm);
+                    if (isMain) await this.send(from, `🔥 [ NOBI-NVN BURN ] @${burnNorm.split('@')[0]} burn ho gaya! Har msg pe 3x report hoga.`, [burnNorm]);
+                }
+                break;
+
+            case 'unburn':
+                if (!isGroup) return;
+                const ubCount = burnedUsers.get(from)?.size || 0;
+                burnedUsers.delete(from);
+                saveMapFile(BURNED_FILE, burnedUsers);
+                if (isMain) await this.send(from, `🧊 [ NOBI-NVN UNBURN ALL ] ${ubCount} users unburn ho gaye!`);
                 break;
 
             case 'slide':
@@ -906,8 +1067,43 @@ console.log('╔═════════════════════�
 console.log('║    ❄️ CYBER EXOTIC MATRIX V3.6 ❄️     ║');
 console.log('╚═══════════════════════════════════════╝\n');
 
+// ==================== SESSION CHOICE PROMPT ====================
+console.log('╔══════════════════════════════════════════╗');
+console.log('║        🔄  SESSION  MANAGEMENT  🔄        ║');
+console.log('╠══════════════════════════════════════════╣');
+console.log('║  1  →  Continue with OLD accounts        ║');
+console.log('║  2  →  Clear ALL & login with NEW acc    ║');
+console.log('╚══════════════════════════════════════════╝\n');
+
+const rlChoice = readline.createInterface({ input: process.stdin, output: process.stdout });
+const askChoice = (q) => new Promise(r => rlChoice.question(q, r));
+
+const sessionChoice = await askChoice('Enter choice (1 = Old  /  2 = New fresh login): ');
+if (sessionChoice.trim() === '2') {
+    console.log('\n🗑️  Clearing all sessions...\n');
+    try {
+        if (fs.existsSync('./auth')) {
+            for (const dir of fs.readdirSync('./auth')) {
+                fs.rmSync(`./auth/${dir}`, { recursive: true, force: true });
+                console.log(`[CLEAR] Deleted auth: ${dir}`);
+            }
+        }
+        if (fs.existsSync(BOTS_FILE)) fs.unlinkSync(BOTS_FILE);
+        if (fs.existsSync(ROLES_FILE)) {
+            fs.unlinkSync(ROLES_FILE);
+            roles = { ...defaultRoles };
+        }
+    } catch (err) {
+        console.error('[CLEAR] Error:', err.message);
+    }
+    console.log('✅ Done! Starting fresh login...\n');
+} else {
+    console.log('\n🔁 Continuing with old accounts...\n');
+}
+rlChoice.close();
+
 const manager = new BotManager();
-manager.init();
+await manager.init();
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 rl.on('line', (input) => {
