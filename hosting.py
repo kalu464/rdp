@@ -2048,14 +2048,23 @@ def terminal_open_callback(call):
         }
 
         bot.answer_callback_query(call.id, "🖥️ Terminal opened.")
+        is_script_live = is_bot_running(script_owner_id, file_name)
+        mode_note = (
+            "🟢 *Script is RUNNING* — your input goes directly to its stdin.\n"
+            "   _(e.g. phone numbers, OTPs, menu choices)_"
+            if is_script_live else
+            "🔴 *Script is STOPPED* — input runs as a shell command."
+        )
         msg = bot.send_message(
             chat_id,
             "🖥️ *NOBIX Terminal*\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📄 Script : `{file_name}`\n"
             f"📁 Dir    : `{user_folder}`\n\n"
-            "Type any shell command and it runs inside the script's folder.\n"
-            "Last 6 lines of output will be shown after each command.\n\n"
+            f"{mode_note}\n\n"
+            "• If script is *running* → input feeds its stdin\n"
+            "• If script is *stopped* → input runs as a shell command\n"
+            "• Last 6 log lines shown after each input\n\n"
             "Press *Exit Terminal* when done.",
             reply_markup=_make_exit_markup(requesting_user_id),
             parse_mode='Markdown'
@@ -2065,6 +2074,21 @@ def terminal_open_callback(call):
     except Exception as e:
         logger.error(f"Error in terminal_open_callback: {e}", exc_info=True)
         bot.answer_callback_query(call.id, "❌ Error opening terminal.", show_alert=True)
+
+
+def _read_log_tail(user_folder, file_name, n=6):
+    """Return the last n lines of a script's log file."""
+    log_path = os.path.join(user_folder, f"{os.path.splitext(file_name)[0]}.log")
+    if not os.path.exists(log_path):
+        return "(log file not found)"
+    try:
+        with open(log_path, 'r', encoding='utf-8', errors='ignore') as lf:
+            lines = lf.read().splitlines()
+        if not lines:
+            return "(log is empty)"
+        return '\n'.join(lines[-n:])
+    except Exception as e:
+        return f"(could not read log: {e})"
 
 
 def process_terminal_command(message, user_id):
@@ -2079,51 +2103,86 @@ def process_terminal_command(message, user_id):
         return
 
     term_info = terminal_mode_users[user_id]
-    user_folder = term_info['user_folder']
-    file_name = term_info['file_name']
-    command_text = (message.text or '').strip()
+    user_folder   = term_info['user_folder']
+    file_name     = term_info['file_name']
+    script_owner_id = term_info['script_owner_id']
+    command_text  = (message.text or '').strip()
 
     if not command_text:
-        bot.send_message(chat_id, "⚠️ Empty command. Type a shell command or press *Exit Terminal*.",
+        bot.send_message(chat_id,
+                         "⚠️ Empty input. Type a command/input or press *Exit Terminal*.",
                          reply_markup=_make_exit_markup(user_id), parse_mode='Markdown')
         bot.register_next_step_handler(message, process_terminal_command, user_id)
         return
 
-    logger.info(f"Terminal cmd from {user_id}: {command_text}")
+    logger.info(f"Terminal input from {user_id}: {command_text}")
 
-    try:
-        result = subprocess.run(
-            command_text, shell=True, cwd=user_folder,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=15, encoding='utf-8', errors='ignore'
-        )
-        raw_out = (result.stdout + result.stderr).strip()
-        if not raw_out:
-            raw_out = "(no output)"
-        lines = raw_out.splitlines()
-        last_lines = '\n'.join(lines[-6:])
-        rc_icon = "✅" if result.returncode == 0 else "❌"
-        response = (
-            "🖥️ *NOBIX Terminal*\n"
-            "━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"$ `{command_text}`\n\n"
-            f"{rc_icon} Exit code: `{result.returncode}`\n\n"
-            f"```\n{last_lines}\n```"
-        )
-    except subprocess.TimeoutExpired:
-        response = (
-            "🖥️ *NOBIX Terminal*\n"
-            "━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"$ `{command_text}`\n\n"
-            "⏱️ *Command timed out (15 s limit)*"
-        )
-    except Exception as e:
-        response = (
-            "🖥️ *NOBIX Terminal*\n"
-            "━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"$ `{command_text}`\n\n"
-            f"❌ Error: `{e}`"
-        )
+    script_key  = f"{script_owner_id}_{file_name}"
+    script_info = bot_scripts.get(script_key)
+    running     = is_bot_running(script_owner_id, file_name)
+
+    if running and script_info and script_info.get('process'):
+        # ── Script is running → feed input directly into its stdin ──
+        proc = script_info['process']
+        try:
+            proc.stdin.write(command_text + '\n')
+            proc.stdin.flush()
+            time.sleep(1.2)           # Give the script time to react and log output
+            tail = _read_log_tail(user_folder, file_name, n=6)
+            response = (
+                "🖥️ *NOBIX Terminal — Script Input*\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📥 Sent to script: `{command_text}`\n\n"
+                f"📜 *Last 6 log lines:*\n"
+                f"```\n{tail}\n```"
+            )
+        except BrokenPipeError:
+            response = (
+                "🖥️ *NOBIX Terminal*\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📥 Input: `{command_text}`\n\n"
+                "❌ *Broken pipe — script may have stopped.*"
+            )
+        except Exception as e:
+            response = (
+                "🖥️ *NOBIX Terminal*\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📥 Input: `{command_text}`\n\n"
+                f"❌ Error sending to script stdin: `{e}`"
+            )
+    else:
+        # ── Script not running → execute as a normal shell command ──
+        try:
+            result = subprocess.run(
+                command_text, shell=True, cwd=user_folder,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=15, encoding='utf-8', errors='ignore'
+            )
+            raw_out = (result.stdout + result.stderr).strip() or "(no output)"
+            lines   = raw_out.splitlines()
+            tail    = '\n'.join(lines[-6:])
+            rc_icon = "✅" if result.returncode == 0 else "❌"
+            response = (
+                "🖥️ *NOBIX Terminal — Shell*\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"$ `{command_text}`\n\n"
+                f"{rc_icon} Exit code: `{result.returncode}`\n\n"
+                f"```\n{tail}\n```"
+            )
+        except subprocess.TimeoutExpired:
+            response = (
+                "🖥️ *NOBIX Terminal — Shell*\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"$ `{command_text}`\n\n"
+                "⏱️ *Command timed out (15 s)*"
+            )
+        except Exception as e:
+            response = (
+                "🖥️ *NOBIX Terminal — Shell*\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"$ `{command_text}`\n\n"
+                f"❌ Error: `{e}`"
+            )
 
     if len(response) > 4000:
         response = response[:3990] + "\n...(truncated)`"
