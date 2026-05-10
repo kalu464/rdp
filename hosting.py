@@ -30,7 +30,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "I'am Atx File Host By SPARKY and SPARKY"
+    return "⚡ NOBIX — Bot Hosting Platform | Online"
 
 def run_flask():
   # Make sure to run on port provided by environment or default to 8080
@@ -78,6 +78,7 @@ user_files = {} # {user_id: [(file_name, file_type), ...]}
 active_users = set() # Set of all user IDs that have interacted with the bot
 admin_ids = {ADMIN_ID, OWNER_ID} # Set of admin IDs
 bot_locked = False
+terminal_mode_users = {} # {user_id: {'user_folder': ..., 'file_name': ..., 'chat_id': ...}}
 # free_mode = False # Removed free_mode
 
 # --- Logging Setup ---
@@ -100,6 +101,15 @@ ADMIN_COMMAND_BUTTONS_LAYOUT_USER_SPEC = [
     ["💳 Subscriptions", "📢 Broadcast"],
     ["🔒 Lock Bot", "🟢 Running All Code"], # Changed "Free Mode" to "Running All Code"
     ["👑 Admin Panel", "📞 Contact Owner"]
+]
+OWNER_COMMAND_BUTTONS_LAYOUT_USER_SPEC = [
+    ["📢 Updates Channel"],
+    ["📤 Upload File", "📂 Check Files"],
+    ["⚡ Bot Speed", "📊 Statistics"],
+    ["💳 Subscriptions", "📢 Broadcast"],
+    ["🔒 Lock Bot", "🟢 Running All Code"],
+    ["💻 VPS Specs", "👑 Admin Panel"],
+    ["📞 Contact Owner"]
 ]
 
 # --- Database Setup ---
@@ -812,6 +822,8 @@ def create_main_menu_inline(user_id):
         markup.add(admin_buttons[1], admin_buttons[3]) # Stats, Broadcast
         markup.add(admin_buttons[2], admin_buttons[5]) # Lock Bot, Run All Scripts
         markup.add(admin_buttons[4]) # Admin Panel
+        if user_id == OWNER_ID:
+            markup.add(types.InlineKeyboardButton('💻 VPS Specs', callback_data='vps_specs'))
         markup.add(buttons[4]) # Contact
     else:
         markup.add(buttons[0])
@@ -823,14 +835,18 @@ def create_main_menu_inline(user_id):
 
 def create_reply_keyboard_main_menu(user_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    layout_to_use = ADMIN_COMMAND_BUTTONS_LAYOUT_USER_SPEC if user_id in admin_ids else COMMAND_BUTTONS_LAYOUT_USER_SPEC
+    if user_id == OWNER_ID:
+        layout_to_use = OWNER_COMMAND_BUTTONS_LAYOUT_USER_SPEC
+    elif user_id in admin_ids:
+        layout_to_use = ADMIN_COMMAND_BUTTONS_LAYOUT_USER_SPEC
+    else:
+        layout_to_use = COMMAND_BUTTONS_LAYOUT_USER_SPEC
     for row_buttons_text in layout_to_use:
         markup.add(*[types.KeyboardButton(text) for text in row_buttons_text])
     return markup
 
-def create_control_buttons(script_owner_id, file_name, is_running=True): # Parameter renamed
+def create_control_buttons(script_owner_id, file_name, is_running=True):
     markup = types.InlineKeyboardMarkup(row_width=2)
-    # Callbacks use script_owner_id
     if is_running:
         markup.row(
             types.InlineKeyboardButton("🔴 Stop", callback_data=f'stop_{script_owner_id}_{file_name}'),
@@ -840,13 +856,17 @@ def create_control_buttons(script_owner_id, file_name, is_running=True): # Param
             types.InlineKeyboardButton("🗑️ Delete", callback_data=f'delete_{script_owner_id}_{file_name}'),
             types.InlineKeyboardButton("📜 Logs", callback_data=f'logs_{script_owner_id}_{file_name}')
         )
+        markup.row(
+            types.InlineKeyboardButton("🖥️ Terminal", callback_data=f'terminal_{script_owner_id}_{file_name}')
+        )
     else:
         markup.row(
             types.InlineKeyboardButton("🟢 Start", callback_data=f'start_{script_owner_id}_{file_name}'),
             types.InlineKeyboardButton("🗑️ Delete", callback_data=f'delete_{script_owner_id}_{file_name}')
         )
         markup.row(
-            types.InlineKeyboardButton("📜 View Logs", callback_data=f'logs_{script_owner_id}_{file_name}')
+            types.InlineKeyboardButton("📜 View Logs", callback_data=f'logs_{script_owner_id}_{file_name}'),
+            types.InlineKeyboardButton("🖥️ Terminal", callback_data=f'terminal_{script_owner_id}_{file_name}')
         )
     markup.add(types.InlineKeyboardButton("🔙 Back to Files", callback_data='check_files'))
     return markup
@@ -1041,13 +1061,20 @@ def _logic_send_welcome(message):
         else: user_status = "🆓 Free User (Expired Sub)"; remove_subscription_db(user_id) # Clean up expired
     else: user_status = "🆓 Free User"
 
-    welcome_msg_text = (f"〽️ Welcome, {user_name}!\n\n🆔 Your User ID: `{user_id}`\n"
-                        f"✳️ Username: `@{user_username or 'Not set'}`\n"
-                        f"🔰 Your Status: {user_status}{expiry_info}\n"
-                        f"📁 Files Uploaded: {current_files} / {limit_str}\n\n"
-                        f"🤖 Host & run Python (`.py`) or JS (`.js`) scripts.\n"
-                        f"   Upload single scripts or `.zip` archives.\n\n"
-                        f"👇 Use buttons or type commands.")
+    welcome_msg_text = (
+        f"⚡ *NOBIX — Bot Hosting Platform*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👋 Welcome, *{user_name}*!\n\n"
+        f"🆔 User ID: `{user_id}`\n"
+        f"✳️ Username: `@{user_username or 'Not set'}`\n"
+        f"🔰 Status: {user_status}{expiry_info}\n"
+        f"📁 Files: `{current_files} / {limit_str}`\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🤖 Host & run Python `.py` · JS `.js` · ZIP `.zip`\n"
+        f"🖥️ Built-in terminal for manual commands\n"
+        f"📜 Live logs · Auto dependency install\n\n"
+        f"👇 Use the buttons below to get started."
+    )
     main_reply_markup = create_reply_keyboard_main_menu(user_id)
     try:
         if photo_file_id: bot.send_photo(chat_id, photo_file_id)
@@ -1267,6 +1294,73 @@ def _logic_run_all_scripts(message_or_call):
     logger.info(f"Run all scripts finished. Admin: {admin_user_id}. Started: {started_count}. Skipped/Errors: {skipped_files}")
 
 
+
+
+def _logic_vps_specs(message):
+    """Show VPS hardware specifications - Owner only."""
+    if message.from_user.id != OWNER_ID:
+        bot.reply_to(message, "⚠️ Owner permissions required.")
+        return
+    try:
+        def progress_bar(percent, length=10):
+            filled = int(length * percent / 100)
+            return '█' * filled + '░' * (length - filled)
+
+        # RAM
+        ram = psutil.virtual_memory()
+        ram_total_gb = round(ram.total / (1024 ** 3), 2)
+        ram_used_gb  = round(ram.used  / (1024 ** 3), 2)
+        ram_free_gb  = round(ram.available / (1024 ** 3), 2)
+        ram_pct      = ram.percent
+
+        # Storage (root)
+        disk = psutil.disk_usage('/')
+        disk_total_gb = round(disk.total / (1024 ** 3), 2)
+        disk_used_gb  = round(disk.used  / (1024 ** 3), 2)
+        disk_free_gb  = round(disk.free  / (1024 ** 3), 2)
+        disk_pct      = disk.percent
+
+        # CPU
+        cpu_logical  = psutil.cpu_count(logical=True)
+        cpu_physical = psutil.cpu_count(logical=False) or cpu_logical
+        cpu_pct      = psutil.cpu_percent(interval=1)
+        cpu_freq     = psutil.cpu_freq()
+        freq_str     = f"{round(cpu_freq.current)} MHz" if cpu_freq else "N/A"
+
+        def status_emoji(pct):
+            if pct < 50: return "🟢"
+            if pct < 80: return "🟡"
+            return "🔴"
+
+        specs_msg = (
+            "⚡ *NOBIX — VPS Specifications*\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "🖥️ *CPU*\n"
+            f"  • Physical Cores : `{cpu_physical}`\n"
+            f"  • Logical Cores  : `{cpu_logical}`\n"
+            f"  • Frequency      : `{freq_str}`\n"
+            f"  • Usage  {status_emoji(cpu_pct)} : `{cpu_pct}%`\n"
+            f"  `[{progress_bar(cpu_pct)}]`\n\n"
+            "🧠 *RAM*\n"
+            f"  • Total : `{ram_total_gb} GB`\n"
+            f"  • Used  : `{ram_used_gb} GB`\n"
+            f"  • Free  : `{ram_free_gb} GB`\n"
+            f"  • Usage {status_emoji(ram_pct)} : `{ram_pct}%`\n"
+            f"  `[{progress_bar(ram_pct)}]`\n\n"
+            "💾 *Storage  (/)*\n"
+            f"  • Total : `{disk_total_gb} GB`\n"
+            f"  • Used  : `{disk_used_gb} GB`\n"
+            f"  • Free  : `{disk_free_gb} GB`\n"
+            f"  • Usage {status_emoji(disk_pct)} : `{disk_pct}%`\n"
+            f"  `[{progress_bar(disk_pct)}]`\n\n"
+            "━━━━━━━━━━━━━━━━━━━━"
+        )
+        bot.reply_to(message, specs_msg, parse_mode='Markdown')
+        logger.info(f"VPS specs sent to Owner {message.from_user.id}.")
+    except Exception as e:
+        logger.error(f"Error fetching VPS specs: {e}", exc_info=True)
+        bot.reply_to(message, f"❌ Error fetching VPS specs: {e}")
+
 # --- Command Handlers & Text Handlers for ReplyKeyboard ---
 @bot.message_handler(commands=['start', 'help'])
 def command_send_welcome(message): _logic_send_welcome(message)
@@ -1287,6 +1381,7 @@ BUTTON_TEXT_TO_LOGIC = {
     "🔒 Lock Bot": _logic_toggle_lock_bot, 
     # "💰 Free Mode": _logic_toggle_free_mode, # Removed
     "🟢 Running All Code": _logic_run_all_scripts, # Added
+    "💻 VPS Specs": _logic_vps_specs, # Owner only
     "👑 Admin Panel": _logic_admin_panel,
 }
 
@@ -1320,6 +1415,8 @@ def command_lock_bot(message): _logic_toggle_lock_bot(message)
 def command_admin_panel(message): _logic_admin_panel(message)
 @bot.message_handler(commands=['runningallcode']) # Added
 def command_run_all_code(message): _logic_run_all_scripts(message)
+@bot.message_handler(commands=['vpsspec', 'specs', 'vps'])
+def command_vps_specs(message): _logic_vps_specs(message)
 
 
 @bot.message_handler(commands=['ping'])
@@ -1431,6 +1528,9 @@ def handle_callbacks(call):
         elif data == 'add_subscription': admin_required_callback(call, add_subscription_init_callback) 
         elif data == 'remove_subscription': admin_required_callback(call, remove_subscription_init_callback) 
         elif data == 'check_subscription': admin_required_callback(call, check_subscription_init_callback) 
+        elif data == 'vps_specs': owner_required_callback(call, vps_specs_callback)
+        elif data.startswith('terminal_exit_'): terminal_exit_callback(call)
+        elif data.startswith('terminal_'): terminal_open_callback(call)
         else:
             bot.answer_callback_query(call.id, "Unknown action.")
             logger.warning(f"Unhandled callback data: {data} from user {user_id}")
@@ -1913,6 +2013,155 @@ def unlock_bot_callback(call):
 
 def run_all_scripts_callback(call): # Added
     _logic_run_all_scripts(call) # Pass the call object
+
+
+def vps_specs_callback(call):
+    bot.answer_callback_query(call.id)
+    _logic_vps_specs(call.message)
+
+
+# --- Terminal Callbacks ---
+
+def _make_exit_markup(user_id):
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("⬅️ Exit Terminal", callback_data=f'terminal_exit_{user_id}'))
+    return markup
+
+def terminal_open_callback(call):
+    try:
+        parts = call.data.split('_', 2)
+        script_owner_id = int(parts[1])
+        file_name = parts[2]
+        requesting_user_id = call.from_user.id
+        chat_id = call.message.chat.id
+
+        if not (requesting_user_id == script_owner_id or requesting_user_id in admin_ids):
+            bot.answer_callback_query(call.id, "⚠️ Permission denied.", show_alert=True)
+            return
+
+        user_folder = get_user_folder(script_owner_id)
+        terminal_mode_users[requesting_user_id] = {
+            'script_owner_id': script_owner_id,
+            'file_name': file_name,
+            'user_folder': user_folder,
+            'chat_id': chat_id
+        }
+
+        bot.answer_callback_query(call.id, "🖥️ Terminal opened.")
+        msg = bot.send_message(
+            chat_id,
+            "🖥️ *NOBIX Terminal*\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📄 Script : `{file_name}`\n"
+            f"📁 Dir    : `{user_folder}`\n\n"
+            "Type any shell command and it runs inside the script's folder.\n"
+            "Last 6 lines of output will be shown after each command.\n\n"
+            "Press *Exit Terminal* when done.",
+            reply_markup=_make_exit_markup(requesting_user_id),
+            parse_mode='Markdown'
+        )
+        bot.register_next_step_handler(msg, process_terminal_command, requesting_user_id)
+        logger.info(f"Terminal opened for user {requesting_user_id} on script '{file_name}'.")
+    except Exception as e:
+        logger.error(f"Error in terminal_open_callback: {e}", exc_info=True)
+        bot.answer_callback_query(call.id, "❌ Error opening terminal.", show_alert=True)
+
+
+def process_terminal_command(message, user_id):
+    chat_id = message.chat.id
+
+    if user_id not in terminal_mode_users:
+        return
+
+    if message.from_user.id != user_id:
+        if user_id in terminal_mode_users:
+            bot.register_next_step_handler(message, process_terminal_command, user_id)
+        return
+
+    term_info = terminal_mode_users[user_id]
+    user_folder = term_info['user_folder']
+    file_name = term_info['file_name']
+    command_text = (message.text or '').strip()
+
+    if not command_text:
+        bot.send_message(chat_id, "⚠️ Empty command. Type a shell command or press *Exit Terminal*.",
+                         reply_markup=_make_exit_markup(user_id), parse_mode='Markdown')
+        bot.register_next_step_handler(message, process_terminal_command, user_id)
+        return
+
+    logger.info(f"Terminal cmd from {user_id}: {command_text}")
+
+    try:
+        result = subprocess.run(
+            command_text, shell=True, cwd=user_folder,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=15, encoding='utf-8', errors='ignore'
+        )
+        raw_out = (result.stdout + result.stderr).strip()
+        if not raw_out:
+            raw_out = "(no output)"
+        lines = raw_out.splitlines()
+        last_lines = '\n'.join(lines[-6:])
+        rc_icon = "✅" if result.returncode == 0 else "❌"
+        response = (
+            "🖥️ *NOBIX Terminal*\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"$ `{command_text}`\n\n"
+            f"{rc_icon} Exit code: `{result.returncode}`\n\n"
+            f"```\n{last_lines}\n```"
+        )
+    except subprocess.TimeoutExpired:
+        response = (
+            "🖥️ *NOBIX Terminal*\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"$ `{command_text}`\n\n"
+            "⏱️ *Command timed out (15 s limit)*"
+        )
+    except Exception as e:
+        response = (
+            "🖥️ *NOBIX Terminal*\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"$ `{command_text}`\n\n"
+            f"❌ Error: `{e}`"
+        )
+
+    if len(response) > 4000:
+        response = response[:3990] + "\n...(truncated)`"
+
+    msg = bot.send_message(chat_id, response,
+                           reply_markup=_make_exit_markup(user_id), parse_mode='Markdown')
+
+    if user_id in terminal_mode_users:
+        bot.register_next_step_handler(msg, process_terminal_command, user_id)
+
+
+def terminal_exit_callback(call):
+    try:
+        user_id_to_exit = int(call.data.rsplit('_', 1)[-1])
+        if call.from_user.id != user_id_to_exit and call.from_user.id not in admin_ids:
+            bot.answer_callback_query(call.id, "⚠️ Permission denied.", show_alert=True)
+            return
+
+        terminal_mode_users.pop(user_id_to_exit, None)
+        bot.clear_step_handler_by_chat_id(call.message.chat.id)
+
+        bot.answer_callback_query(call.id, "✅ Exited terminal.")
+        try:
+            bot.edit_message_text(
+                "🖥️ *NOBIX Terminal — Closed*\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "You have exited terminal mode.\n"
+                "Your chat input is now back to normal.",
+                call.message.chat.id, call.message.message_id,
+                reply_markup=None, parse_mode='Markdown'
+            )
+        except Exception: pass
+        logger.info(f"Terminal exited for user {user_id_to_exit}.")
+    except Exception as e:
+        logger.error(f"Error in terminal_exit_callback: {e}", exc_info=True)
+        bot.answer_callback_query(call.id, "❌ Error exiting terminal.", show_alert=True)
+
+# --- End Terminal Callbacks ---
 
 
 def broadcast_init_callback(call):
